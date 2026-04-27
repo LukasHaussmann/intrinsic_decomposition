@@ -36,12 +36,49 @@ else:
     device = torch.device("cpu")
 
 
+def make_checker_albedo(H, W, num_squares=8):
+    """Multi-color checkerboard. Returns (H, W, 3) in [0, 1]."""
+    palette = torch.tensor([
+        [0.9, 0.2, 0.2],   # red
+        [0.2, 0.9, 0.2],   # green
+        [0.2, 0.2, 0.9],   # blue
+        [0.9, 0.9, 0.2],   # yellow
+        [0.9, 0.2, 0.9],   # magenta
+        [0.2, 0.9, 0.9],   # cyan
+        [0.85, 0.85, 0.85],# near-white
+        [0.15, 0.15, 0.15],# near-black
+    ])
+    sq_h = H // num_squares
+    sq_w = W // num_squares
+    albedo = torch.zeros(H, W, 3)
+    for i in range(num_squares):
+        for j in range(num_squares):
+            color_idx = (i * 3 + j * 5) % len(palette)
+            albedo[i*sq_h:(i+1)*sq_h, j*sq_w:(j+1)*sq_w] = palette[color_idx]
+    return albedo
+
+
+ALBEDO_IMAGE_PATH = "sheep.jpg"
+
 sphere_mesh = ico_sphere(level=3).to(device)
 verts = sphere_mesh.verts_packed()
-verts_rgb = torch.ones_like(verts)[None] * torch.tensor(
-    [0, 0, 0.9], device=device
+faces = sphere_mesh.faces_packed()
+
+x, y, z = verts[:, 0], verts[:, 1], verts[:, 2]
+u = (torch.atan2(z, x) + torch.pi) / (2 * torch.pi)
+v = (torch.asin(y.clamp(-1, 1)) + torch.pi / 2) / torch.pi
+verts_uvs = torch.stack([u, v], dim=1).to(device)  # (V, 2)
+
+tex_map = make_checker_albedo(256, 256).to(device)  # (H, W, 3)
+#tex_map = torch.tensor([0.7, 0.6, 0.2], device=device).expand(256, 256, 3).contiguous()  # single color
+#tex_map = torch.from_numpy(
+#    __import__("numpy").array(Image.open(ALBEDO_IMAGE_PATH).convert("RGB"), dtype="float32") / 255.0
+#).to(device)
+sphere_mesh.textures = TexturesUV(
+    maps=tex_map[None],           # (1, H, W, 3)
+    faces_uvs=faces[None],        # (1, F, 3)
+    verts_uvs=verts_uvs[None],    # (1, V, 2)
 )
-sphere_mesh.textures = TexturesVertex(verts_features=verts_rgb)
 
 
 R, T = look_at_view_transform(dist=2.7, elev=10, azim=0)
