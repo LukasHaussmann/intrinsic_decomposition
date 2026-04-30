@@ -432,6 +432,7 @@ def compute_albedo_scale(rho_est, rho_gt):
 def plot_results(
     rho_gt: torch.Tensor,
     rho_unaligned: torch.Tensor,
+    alpha: torch.Tensor,
     images_flat: torch.Tensor,
     predicted: torch.Tensor,
     y_tilde: torch.Tensor,
@@ -452,12 +453,14 @@ def plot_results(
     pred_shading = (torch.einsum('pi,kci->kpc', y_tilde, L_pred) / math.pi).clamp(0, 1)
     gt_shading = (images_flat / (rho_gt.unsqueeze(0) + 1e-8)).clamp(0, 1) if rho_gt is not None else None
 
-    if rho_gt is not None:
-        alpha = (rho_gt * rho_unaligned).sum(0) / ((rho_unaligned ** 2).sum(0) + 1e-8)
-        rho_aligned    = rho_unaligned * alpha.unsqueeze(0)
-        albedo_residual = (rho_aligned - rho_gt).abs()
+    if alpha is not None:
+        rho_aligned = rho_unaligned * alpha
+        albedo_residual = (rho_aligned - rho_gt).abs() if rho_gt is not None else None
+        pred_shading_aligned = (pred_shading / alpha.clamp(min=1e-8)).clamp(0, 1)
     else:
+        rho_aligned = None
         albedo_residual = None
+        pred_shading_aligned = pred_shading
 
     def to_img(flat, bg=0.0):
         canvas = np.full((H, W, 3), bg, dtype=np.float32)
@@ -469,40 +472,43 @@ def plot_results(
         canvas[mask_np] = 1.0 - flat.detach().cpu().float().numpy().clip(0, 1)
         return canvas
 
-    # Col 0 (width 2): GT albedo / estimated / albedo residual in thirds.
-    # Cols 1-6: GT render | pred render | render residual | GT shading | pred shading | shading residual.
+    # Col 0 (width 2): GT albedo / estimated / aligned / residual in quarters.
+    # Cols 1-7: GT render | pred render | render residual | GT shading | pred shading | aligned shading | shading residual.
     cell = 3
-    third = max(1, num_show // 3)
-    gs = gridspec.GridSpec(num_show, 7, hspace=0.09, wspace=0.08,
-                           width_ratios=[2, 1, 1, 1, 1, 1, 1])
-    fig = plt.figure(figsize=(cell * (2 + 6), cell * num_show))
+    q = max(1, num_show // 4)
+    gs = gridspec.GridSpec(num_show, 8, hspace=0.09, wspace=0.08,
+                           width_ratios=[2, 1, 1, 1, 1, 1, 1, 1])
+    fig = plt.figure(figsize=(cell * (2 + 7), cell * num_show))
 
     # --- albedo column ---
-    ax_gt  = fig.add_subplot(gs[:third, 0])
-    ax_est = fig.add_subplot(gs[third:2*third, 0])
-    ax_res = fig.add_subplot(gs[2*third:, 0])
+    ax_gt  = fig.add_subplot(gs[:q, 0])
+    ax_est = fig.add_subplot(gs[q:2*q, 0])
+    ax_ali = fig.add_subplot(gs[2*q:3*q, 0])
+    ax_res = fig.add_subplot(gs[3*q:, 0])
     ax_gt.imshow(to_img(rho_gt) if rho_gt is not None else np.zeros((H, W, 3)))
     ax_est.imshow(to_img(rho_unaligned))
+    ax_ali.imshow(to_img(rho_aligned) if rho_aligned is not None else np.zeros((H, W, 3)))
     ax_res.imshow(to_residual(albedo_residual) if albedo_residual is not None else np.ones((H, W, 3)))
-    for ax, title in zip([ax_gt, ax_est, ax_res],
-                         ['GT Albedo', 'Estimated Albedo', 'Albedo Residual']):
+    for ax, title in zip([ax_gt, ax_est, ax_ali, ax_res],
+                         ['GT Albedo', 'Estimated Albedo', 'Aligned Albedo', 'Albedo Residual(aligned vs GT)']):
         ax.axis('off'); ax.set_title(title, fontsize=11, pad=6)
 
     # --- per-image columns ---
     for row in range(num_show):
-        axes = [fig.add_subplot(gs[row, c]) for c in range(1, 7)]
+        axes = [fig.add_subplot(gs[row, c]) for c in range(1, 8)]
         axes[0].imshow(to_img(images_flat[row]))
         axes[1].imshow(to_img(predicted[row].detach()))
         axes[2].imshow(to_residual((predicted[row].detach() - images_flat[row]).abs()))
         if gt_shading is not None:
             axes[3].imshow(to_img(gt_shading[row]))
-            axes[5].imshow(to_residual((pred_shading[row] - gt_shading[row]).abs()))
+            axes[6].imshow(to_residual((pred_shading_aligned[row] - gt_shading[row]).abs()))
         axes[4].imshow(to_img(pred_shading[row]))
+        axes[5].imshow(to_img(pred_shading_aligned[row]))
         for ax in axes:
             ax.axis('off')
         if row == 0:
             for ax, title in zip(axes, ['GT Rendering', 'Reconstructed Rendering', 'Render Residual',
-                                        'GT Shading', 'Estimated Shading', 'Shading Residual']):
+                                        'GT Shading', 'Estimated Shading', 'Aligned Shading', 'Shading Residual']):
                 ax.set_title(title, fontsize=11, pad=6)
 
     plt.savefig(path, dpi=150, bbox_inches='tight')
