@@ -310,7 +310,7 @@ def get_data_from_files(data_dir: str, device: str):
     albedo_gt = albedo_img[..., :3][mask]                           # (P,3)
 
     # RGB renders sorted by filename
-    rgb_paths = sorted(glob.glob(os.path.join(data_dir, "rgb_*.png")))
+    rgb_paths = sorted(glob.glob(os.path.join(data_dir, "rgb_*")))
     imgs_flat = []
     for path in rgb_paths:
         img = load_png(path)[..., :3]                              # (H,W,3)
