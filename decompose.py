@@ -7,17 +7,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from PIL import Image
 
-
-"""
-    lambertian + SH intrinsic decomposition
-    p : pixel, A(p) : albedo of pixel p, S(p) : shading of pixel p
-    I(p) = A(p) * S(p)
-    S(p) : integral over light angles omega that are above the upper hemisphere w.r.t the normal n of p
-    L := SH lighting coefficients
-    
-    Rendering equation:
-    I(p) = A(p) * 
-"""
 # compute weighted SH basis functions
 def compute_sh_basis_weighted(normals: torch.Tensor) -> torch.Tensor:
     x = normals[..., 0]
@@ -219,9 +208,6 @@ def save_shading_maps(L: torch.Tensor, y_tilde: torch.Tensor, mask: torch.Tensor
         canvas = np.zeros((H, W, 3), dtype=np.float32)
         canvas[mask_np] = shading_np[k]
         img = (np.clip(canvas, 0, 1) * 255).astype(np.uint8)
-        Image.fromarray(img).save(f"{output_dir}/shading_{k:04d}.png")
-
-
 def save_albedo(rho: torch.Tensor, mask: torch.Tensor, path: str = "albedo.png"):
     """
     Args:
@@ -451,7 +437,6 @@ def plot_results(
     y_tilde: torch.Tensor,
     L_pred: torch.Tensor,
     mask: torch.Tensor,
-    shading_gt_dir: str = None,
     num_show: int = 4,
     path: str = "results.png",
 ):
@@ -465,59 +450,79 @@ def plot_results(
     num_show = min(num_show, images_flat.shape[0])
 
     pred_shading = (torch.einsum('pi,kci->kpc', y_tilde, L_pred) / math.pi).clamp(0, 1)
+    gt_shading = (images_flat / (rho_gt.unsqueeze(0) + 1e-8)).clamp(0, 1) if rho_gt is not None else None
 
-    def to_img(flat):
-        canvas = np.zeros((H, W, 3), dtype=np.float32)
+    if rho_gt is not None:
+        alpha = (rho_gt * rho_unaligned).sum(0) / ((rho_unaligned ** 2).sum(0) + 1e-8)
+        rho_aligned    = rho_unaligned * alpha.unsqueeze(0)
+        albedo_residual = (rho_aligned - rho_gt).abs()
+    else:
+        albedo_residual = None
+
+    def to_img(flat, bg=0.0):
+        canvas = np.full((H, W, 3), bg, dtype=np.float32)
         canvas[mask_np] = flat.detach().cpu().float().numpy()
         return canvas.clip(0, 1)
 
-    # Albedo cells are 2 rows tall and 2 cols wide → 4× the area of a render cell.
-    # Total grid: num_show rows × 6 cols, width_ratios=[2,1,1,1,1] (albedo col = 2 units wide).
-    cell = 3  # inches per render cell
-    half = num_show // 2
-    gs = gridspec.GridSpec(num_show, 5, hspace=0.05, wspace=0.08,
-                           width_ratios=[2, 1, 1, 1, 1])
-    fig = plt.figure(figsize=(cell * (2 + 4), cell * num_show))
+    def to_residual(flat):
+        canvas = np.ones((H, W, 3), dtype=np.float32)
+        canvas[mask_np] = 1.0 - flat.detach().cpu().float().numpy().clip(0, 1)
+        return canvas
 
-    # --- albedo column (col 0): GT top half, estimated bottom half ---
-    ax_gt  = fig.add_subplot(gs[:half, 0])
-    ax_est = fig.add_subplot(gs[half:, 0])
-    ax_gt.imshow(to_img(rho_gt));         ax_gt.axis('off')
-    ax_est.imshow(to_img(rho_unaligned)); ax_est.axis('off')
-    ax_gt.set_title('GT Albedo',        fontsize=11, pad=6)
-    ax_est.set_title('Estimated Albedo', fontsize=11, pad=6)
+    # Col 0 (width 2): GT albedo / estimated / albedo residual in thirds.
+    # Cols 1-6: GT render | pred render | render residual | GT shading | pred shading | shading residual.
+    cell = 3
+    third = max(1, num_show // 3)
+    gs = gridspec.GridSpec(num_show, 7, hspace=0.09, wspace=0.08,
+                           width_ratios=[2, 1, 1, 1, 1, 1, 1])
+    fig = plt.figure(figsize=(cell * (2 + 6), cell * num_show))
 
-    # --- per-image columns (cols 1-4) ---
+    # --- albedo column ---
+    ax_gt  = fig.add_subplot(gs[:third, 0])
+    ax_est = fig.add_subplot(gs[third:2*third, 0])
+    ax_res = fig.add_subplot(gs[2*third:, 0])
+    ax_gt.imshow(to_img(rho_gt) if rho_gt is not None else np.zeros((H, W, 3)))
+    ax_est.imshow(to_img(rho_unaligned))
+    ax_res.imshow(to_residual(albedo_residual) if albedo_residual is not None else np.ones((H, W, 3)))
+    for ax, title in zip([ax_gt, ax_est, ax_res],
+                         ['GT Albedo', 'Estimated Albedo', 'Albedo Residual']):
+        ax.axis('off'); ax.set_title(title, fontsize=11, pad=6)
+
+    # --- per-image columns ---
     for row in range(num_show):
-        axes = [fig.add_subplot(gs[row, c]) for c in range(1, 5)]
+        axes = [fig.add_subplot(gs[row, c]) for c in range(1, 7)]
         axes[0].imshow(to_img(images_flat[row]))
         axes[1].imshow(to_img(predicted[row].detach()))
-        if shading_gt_dir is not None:
-            gt_shade = np.array(
-                Image.open(f"{shading_gt_dir}/shading_{row:04d}.png")
-            ).astype(np.float32) / 255.0
-            axes[2].imshow(gt_shade.clip(0, 1))
-        axes[3].imshow(to_img(pred_shading[row]))
+        axes[2].imshow(to_residual((predicted[row].detach() - images_flat[row]).abs()))
+        if gt_shading is not None:
+            axes[3].imshow(to_img(gt_shading[row]))
+            axes[5].imshow(to_residual((pred_shading[row] - gt_shading[row]).abs()))
+        axes[4].imshow(to_img(pred_shading[row]))
         for ax in axes:
             ax.axis('off')
         if row == 0:
-            for ax, title in zip(axes, ['GT Rendering', 'Reconstructed Rendering',
-                                        'GT Shading', 'Estimated Shading']):
+            for ax, title in zip(axes, ['GT Rendering', 'Reconstructed Rendering', 'Render Residual',
+                                        'GT Shading', 'Estimated Shading', 'Shading Residual']):
                 ax.set_title(title, fontsize=11, pad=6)
 
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"Saved results figure to {path}")
 
+"""
+- take gt albedo, normals, mask from file -> generate random lighting with sh coefficients
+- use pytorch3d renderer to get gt directly (also get rendered images)
+- 
+"""
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    generate_images(num_variations=8,device=device)
+    generate_images(num_variations=2,device=device)
 
     images_flat, normals_flat, mask = load_render_data("renders_rand", device=device)
     #rho, L = alternating_least_squares(normals_flat, images_flat, num_iters=100)
-    rho, L = gradient_descent_optimizer(normals_flat, images_flat, mask, num_steps=200)
+    rho, L = gradient_descent_optimizer(normals_flat, images_flat, mask, num_steps=50)
 
     y_tilde   = compute_sh_basis_weighted(normals_flat)
     predicted = predict_images(rho, L, y_tilde)
@@ -545,8 +550,8 @@ def main():
         rho_gt=rho_gt, rho_unaligned=rho,
         images_flat=images_flat, predicted=predicted,
         y_tilde=y_tilde, L_pred=L,
-        mask=mask, shading_gt_dir='shadings_rand',
-        num_show=8, path='results.png',
+        mask=mask,
+        num_show=2, path='results.png',
     )
 
 if __name__ == "__main__":
